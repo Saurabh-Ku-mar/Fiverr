@@ -58,6 +58,28 @@ const b64=u=>btoa(String.fromCharCode(...new Uint8Array(u))).replace(/\+/g,'-').
 const ub=s=>Uint8Array.from(atob(s.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 let S=null,vk=null,vs=null,db=null,me=null,cur=null,subs=[],P={},meta={},ck={},idle=null,msgUn=null;
+
+const CFG={url:'PASTE_SUPABASE_URL',key:'PASTE_SUPABASE_ANON_KEY'};
+function mkdb(U,K){let A=null;try{A=JSON.parse(localStorage.getItem('sc_auth'))}catch(e){}
+const H=(t,x)=>({apikey:K,'Content-Type':'application/json',...(t?{Authorization:'Bearer '+t}:{}),...x});
+async function tok(){if(A&&A.exp>Date.now()+60000)return A.t;let r=null;
+if(A&&A.r){r=await fetch(U+'/auth/v1/token?grant_type=refresh_token',{method:'POST',headers:H(),body:JSON.stringify({refresh_token:A.r})});if(!r.ok)r=null}
+if(!r)r=await fetch(U+'/auth/v1/signup',{method:'POST',headers:H(),body:'{}'});
+const j=await r.json();if(!j.access_token)throw new Error('auth');
+A={t:j.access_token,r:j.refresh_token,id:j.user.id,exp:Date.now()+j.expires_in*1000};localStorage.setItem('sc_auth',JSON.stringify(A));return A.t}
+async function api(q,o={}){const t=await tok();const r=await fetch(U+'/rest/v1/kv'+q,{...o,headers:H(t,o.prefer?{Prefer:o.prefer}:{})});
+if(!r.ok)throw new Error('db');return o.method==='POST'||o.method==='DELETE'?null:r.json()}
+const par=p=>p.slice(0,p.lastIndexOf('/'));
+function poll(f,cb){let last='',on=true;const run=async()=>{if(!on)return;try{const x=await f();const j=JSON.stringify(x.k);if(j!==last){last=j;cb(x.v)}}catch(e){}setTimeout(run,2500)};run();return()=>{on=false}}
+function doc(p){const d={id:p.split('/').pop(),path:p,
+async get(){const r=await api('?path=eq.'+encodeURIComponent(p));return{id:d.id,exists:!!r[0],data:()=>r[0]&&r[0].data}},
+async set(v){await api('',{method:'POST',prefer:'resolution=merge-duplicates',body:JSON.stringify({path:p,parent:par(p),data:v,ts:Date.now()})})},
+async update(v){const s=await d.get();await d.set({...(s.data()||{}),...v})},
+async delete(){await api('?path=eq.'+encodeURIComponent(p),{method:'DELETE'})},
+onSnapshot(cb){return poll(async()=>{const s=await d.get();return{k:s.data(),v:s}},cb)}};return d}
+return{doc,async uid(){await tok();return A.id},
+collection(p){return{doc:id=>doc(p+'/'+id),orderBy(){return{onSnapshot(cb){return poll(async()=>{const r=await api('?parent=eq.'+encodeURIComponent(p)+'&order=ts.asc&limit=500');
+return{k:r.map(x=>x.path),v:{docs:r.map(x=>({id:x.path,data:()=>x.data}))}}},cb)}}}}}}}
 const V='sc_vault',rnd=n=>crypto.getRandomValues(new Uint8Array(n));
 async function pk(pw,salt){const b=await crypto.subtle.importKey('raw',enc.encode(pw),'PBKDF2',false,['deriveKey']);
 return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:310000,hash:'SHA-256'},b,{name:'AES-GCM',length:256},false,['encrypt','decrypt'])}
@@ -77,7 +99,7 @@ $('lt').textContent=has?'Enter your password to open.':'Create a password. It pr
 $('lb').onclick=unlock;$('pw').onkeydown=$('pw2').onkeydown=e=>{if(e.key==='Enter')unlock()};
 function bump(){clearTimeout(idle);if(S&&S.prefs.lock>0)idle=setTimeout(lockNow,S.prefs.lock*60000)}
 ['click','keydown','touchstart'].forEach(e=>addEventListener(e,bump));
-async function start(){bump();try{const u=await claude.use('user');me=u&&await u.id();db=await claude.use('db')}catch(e){}
+async function start(){bump();try{if(CFG.url.startsWith('http')){db=mkdb(CFG.url,CFG.key);me=await db.uid()}}catch(e){db=null}
 await syncProfile();Object.keys(S.chats).forEach(watch);render()}
 async function syncProfile(){const p=S.prof;$('myn').textContent=p.name;$('mya').textContent=p.about;av($('myav'),p.name,p.color);
 if(db&&me)try{await db.doc('profiles/'+me).set({name:p.name,about:p.about,color:p.color})}catch(e){}}
@@ -115,11 +137,11 @@ $('mod').onclick=e=>{if(e.target===$('mod'))closeM()};
 function toast(t){modal('<p>'+esc(t)+'</p><button onclick="closeM()">OK</button>')}
 $('bnew').onclick=()=>modal('<h3>Invite or join</h3><button id="mk" style="width:100%">Create invite code</button><p class="mu">Or paste a code you received:</p><input id="jc" placeholder="Invite code"><button id="jn">Join chat</button><div class="err" id="je"></div>');
 document.addEventListener('click',async e=>{
-if(e.target.id==='mk'){if(!db||!me)return toast('Open this page in claude.ai while signed in to chat.');const id=b64(rnd(9)),k=b64(rnd(32));
+if(e.target.id==='mk'){if(!db||!me)return toast('Not connected to the server. Check your Supabase URL/key and that Anonymous sign-ins are enabled.');const id=b64(rnd(9)),k=b64(rnd(32));
 try{await db.doc('chats/'+id).set({members:[me],created:Date.now()})}catch(x){return toast('Could not create chat.')}
 S.chats[id]={k,t:Date.now()};await save();watch(id);render();const code=id+'.'+k;
 modal('<h3>Invite code</h3><p class="mu">Send this code to your contact through a secure channel. Anyone with it can read this chat.</p><input readonly value="'+code+'" onclick="this.select()"><button onclick="navigator.clipboard&&navigator.clipboard.writeText(\''+code+'\');this.textContent=\'Copied\'">Copy</button> <button class="g" onclick="closeM()">Done</button>')}
-if(e.target.id==='jn'){const [id,k]=$('jc').value.trim().split('.');const er=$('je');if(!id||!k||!db||!me)return er.textContent='Invalid code, or not signed in.';
+if(e.target.id==='jn'){const [id,k]=$('jc').value.trim().split('.');const er=$('je');if(!id||!k||!db||!me)return er.textContent='Invalid code, or not connected.';
 try{const d=await db.doc('chats/'+id).get();if(!d.exists)return er.textContent='Chat not found.';const m=d.data().members||[];
 if(!m.includes(me)){if(m.length>=2)return er.textContent='This chat already has two members.';await db.doc('chats/'+id).update({members:[...m,me]})}
 ub(k);S.chats[id]={k,t:Date.now(),peer:m.find(x=>x!==me)};await save();watch(id);closeM();render();open(id)}catch(x){er.textContent='Could not join.'}}
